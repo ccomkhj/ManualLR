@@ -1,19 +1,30 @@
 import numpy as np
 import pandas as pd
+from loguru import logger
+from typing import Dict
 
 
-class HexaLinearRegression:
-    def __init__(self, horizon_sg, horizon_fr, theta_sg, theta_fr):
-        self.horizon_sg = horizon_sg
-        self.horizon_fr = horizon_fr
-        self.theta_sg = theta_sg
-        self.theta_fr = theta_fr
+class ManualLR:
+    def __init__(self, lag_features: Dict[str, Dict[str, int]], default_theta: float):
+        """
+        Initializes the ManualLR class.
+
+        Parameters:
+        - lag_features: A dictionary where keys are feature names and values are dictionaries
+          containing 'lag': int for lag horizons and optionally 'theta': float for theta values.
+        - default_theta: A default theta value to use for any feature not specifying its own theta.
+        """
+        self.lag_features = lag_features
+        self.default_theta = default_theta
 
     def _create_modified_identity_matrix(self, size, start, end):
         """Create an identity matrix with modified diagonal values."""
         matrix = np.identity(size)
         diagonal_values = np.linspace(start, end, num=size)
         np.fill_diagonal(matrix, diagonal_values)
+        logger.info(
+            f"Created modified identity matrix of size {size} with start={start}, end={end}"
+        )
         return matrix
 
     def _expand_matrix(self, matrix, new_rows, axis=0):
@@ -23,77 +34,87 @@ class HexaLinearRegression:
         additional_shape = (
             (new_rows, matrix.shape[1]) if axis == 0 else (matrix.shape[0], new_rows)
         )
-        return np.concatenate([matrix, np.zeros(additional_shape)], axis=axis)
-
-    def _modify_matrix(self, matrix, coef_start, coef_end, size):
-        """Modify part of the matrix diagonal with linearly spaced values."""
-        np.fill_diagonal(
-            matrix[:size, :size], np.linspace(coef_start, coef_end, num=size)
+        expanded_matrix = np.concatenate(
+            [matrix, np.zeros(additional_shape)], axis=axis
         )
-        return matrix
+        logger.info(f"Expanded matrix by {new_rows} rows/columns along axis {axis}")
+        return expanded_matrix
 
     def preprocess_coef(self):
-        """Preprocesses and returns the coefficient matrix based on the pre-configured parameters."""
-        fr_coef = self._create_modified_identity_matrix(
-            self.horizon_fr, self.theta_fr, self.theta_fr / 2
+        """
+        Preprocesses and returns the coefficient matrix based on the pre-configured parameters.
+        Uses the 'lag_features' attribute to determine structure.
+        """
+        max_horizon = max(
+            feature_info["lag"] for feature_info in self.lag_features.values()
         )
-        fr_coef = self._expand_matrix(
-            fr_coef, self.horizon_sg - self.horizon_fr, axis=0
-        )
+        coef_matrices = []
+        for feature, info in self.lag_features.items():
+            horizon = info["lag"]
+            theta = info.get("theta", self.default_theta)
+            ini_coef_matrix = self._create_modified_identity_matrix(
+                horizon, theta, theta / 2
+            )
+            logger.info(
+                f"Initial coefficient matrix for feature '{feature}' with theta={theta}"
+            )
 
-        sg_coef = np.identity(self.horizon_sg) * self.theta_sg
-        sg_coef = self._modify_matrix(
-            sg_coef, self.theta_sg / 2, self.theta_sg, self.horizon_fr
-        )
+            if horizon < max_horizon:
+                additional_rows = max_horizon - horizon
+                expanded_coef_matrix = self._expand_matrix(
+                    ini_coef_matrix, additional_rows, axis=0
+                )
+            else:
+                expanded_coef_matrix = ini_coef_matrix
 
-        return np.concatenate([fr_coef, sg_coef], axis=1)
+            coef_matrices.append(expanded_coef_matrix)
 
-    def preprocess_data(self, df):
-        """Renames create_lagged_features to preprocess_data."""
+        final_matrix = np.concatenate(coef_matrices, axis=1)
+        logger.info("Concatenated coefficient matrices for all features")
+        return final_matrix
+
+    def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Process data to create lagged feature DataFrame."""
         lagged_df = pd.DataFrame(index=df.index)
-        # create lagged features for 'sg'
-        for i in range(self.horizon_sg):
-            lagged_df[f"sg_lag_{i+1}"] = df["sg"].shift(i)
+        for feature, info in self.lag_features.items():
+            lag_horizon = info["lag"]
+            for i in range(lag_horizon):
+                lagged_df[f"{feature}_lag_{i+1}"] = df[feature].shift(i)
+                logger.info(f"Generated lagged feature: {feature}_lag_{i+1}")
 
-        # create lagged features for 'fr'
-        for i in range(self.horizon_fr):
-            lagged_df[f"fr_lag_{i+1}"] = df["fr"].shift(i)
+        non_na_lagged_df = lagged_df.dropna()
+        return non_na_lagged_df
 
-        # Drop initial rows where any lagged value would be NaN due to the shifting
-        return lagged_df.dropna()
-
-    def predict(self, df):
-        """Renames forecast to predict."""
+    def predict(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Predict using the preprocessed coefficients and lagged features."""
         coef_matrix = self.preprocess_coef()
-        # Create and process lagged features
         lagged_df = self.preprocess_data(df)
-
-        # Perform matrix multiplication for the forecast
         forecast_results = np.matmul(lagged_df.fillna(0).to_numpy(), coef_matrix.T)
-
-        # Converting results to DataFrame
-        return pd.DataFrame(
+        forecast_df = pd.DataFrame(
             forecast_results,
             index=lagged_df.index,
             columns=[f"Forecast_{i+1}" for i in range(coef_matrix.shape[0])],
         )
+        logger.info("Generated forecast from processed data and coefficients")
+        return forecast_df
 
 
 def main():
-    # Sample usage
     np.random.seed(0)  # For reproducible results
     data = {
         "sg": np.random.rand(100),
         "fr": np.random.rand(100),
     }
-    dates = pd.date_range(start="2022-01-01", periods=100)
+    dates = pd.date_range(start="2023-01-01", periods=100)
     df = pd.DataFrame(data, index=dates)
 
-    model = HexaLinearRegression(
-        horizon_sg=14, horizon_fr=5, theta_sg=0.012, theta_fr=0.014
-    )
+    lag_features = {
+        "sg": {"lag": 14, "theta": 0.012},
+        "fr": {"lag": 5, "theta": 0.014},
+    }
+    model = ManualLR(lag_features, default_theta=0.015)
     forecast_df = model.predict(df)
-    print(forecast_df.tail())
+    print(forecast_df.head())
 
 
 if __name__ == "__main__":
