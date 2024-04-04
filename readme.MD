@@ -2,6 +2,8 @@
 
 This Python script introduces the ManualLR (Manual Linear Regression) class, a customizable tool designed to forecast time series data using a matrix multiplication approach. It stands out for its ability to handle feature-specific lag configurations and varying theta values, offering a flexible and intuitive way to perform forecasting on time series datasets.
 
+It suports mlflow, so the same model can be reused with straightforward-coefficients.
+
 ## Features
 
 - **Custom Lag and Theta Values**: Define the lag (historical horizon) and optional theta (weight decay parameter) for each feature individually, allowing for tailored preprocessing according to the significance and temporal reach of each feature.
